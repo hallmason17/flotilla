@@ -48,7 +48,6 @@ pub enum RaftMessage {
         key: String,
         response: oneshot::Sender<DeleteResponse>,
     },
-    ElectionTimeout,
 }
 #[derive(Debug)]
 pub struct RaftNode {
@@ -119,30 +118,18 @@ impl RaftNode {
         });
     }
 
-    fn start_heartbeat_timer(&mut self, tx: mpsc::Sender<RaftMessage>) {
+    fn start_heartbeat_timer(&mut self) {
         match self.state {
             NodeState::Follower | NodeState::Candidate => {
                 if let Some(h) = self.leader_heartbeat_handle.take() {
                     h.abort();
                 }
-                self.start_election_timeout(tx.clone());
             }
             NodeState::Leader => {
                 let handle = self.start_leader_heartbeat();
                 self.leader_heartbeat_handle = Some(handle);
             }
         }
-    }
-    fn start_election_timeout(&self, tx: mpsc::Sender<RaftMessage>) -> tokio::task::JoinHandle<()> {
-        let interval = self.election_timeout_ms;
-        tokio::spawn(async move {
-            let mut int_timer = tokio::time::interval(interval);
-            int_timer.tick().await;
-            loop {
-                int_timer.tick().await;
-                let _ = tx.send(RaftMessage::ElectionTimeout).await;
-            }
-        })
     }
     fn start_leader_heartbeat(&self) -> tokio::task::JoinHandle<()> {
         let interval = Duration::from_millis(100);
@@ -171,38 +158,55 @@ impl RaftNode {
         })
     }
 
+    fn get_random_election_timeout(&self) -> Duration {
+        let (min, max) = (150, 350);
+        let timeout_ms = rand::rng().random_range(min..=max);
+        info!("New heartbeat timer: {}", timeout_ms);
+        Duration::from_millis(timeout_ms)
+    }
+
     pub async fn run(&mut self) -> anyhow::Result<()> {
         let (tx, mut rx) = mpsc::channel(100);
 
         self.start_grpc_server(tx.clone());
-        self.start_heartbeat_timer(tx.clone());
+        //self.start_heartbeat_timer(tx.clone());
 
-        while let Some(msg) = rx.recv().await {
-            match msg {
-                RaftMessage::VoteRequest { message, response } => {
-                    let resp = self.handle_vote_request(message);
-                    let _ = response.send(resp);
+        let sleep = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(sleep);
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                    Some(RaftMessage::VoteRequest { message, response }) => {
+                        let resp = self.handle_vote_request(message);
+                        let _ = response.send(resp);
+                    }
+                    Some(RaftMessage::AppendEntries { message, response }) => {
+                        let resp = self.handle_append_entries(message);
+                        let _ = response.send(resp);
+                    }
+                    Some(RaftMessage::ClientGetRequest { key, response } )=> {
+                        let resp = self.handle_get_request(&key);
+                        let _ = response.send(resp);
+                    }
+                    Some(RaftMessage::ClientSetRequest {
+                        key,
+                        value,
+                        response,
+                    }) => {
+                        let resp = self.handle_set_request(&key, &value).await;
+                        let _ = response.send(resp);
+                    }
+                    Some(RaftMessage::ClientDeleteRequest { key, response } )=> {
+                        let resp = self.handle_delete_request(&key);
+                        let _ = response.send(resp);
+                    }
+                    None => break,
                 }
-                RaftMessage::AppendEntries { message, response } => {
-                    let resp = self.handle_append_entries(message);
-                    let _ = response.send(resp);
-                }
-                RaftMessage::ElectionTimeout => self.check_election_timeout().await?,
-                RaftMessage::ClientGetRequest { key, response } => {
-                    let resp = self.handle_get_request(&key);
-                    let _ = response.send(resp);
-                }
-                RaftMessage::ClientSetRequest {
-                    key,
-                    value,
-                    response,
-                } => {
-                    let resp = self.handle_set_request(&key, &value).await;
-                    let _ = response.send(resp);
-                }
-                RaftMessage::ClientDeleteRequest { key, response } => {
-                    let resp = self.handle_delete_request(&key);
-                    let _ = response.send(resp);
+                    }
+                _ = sleep.as_mut() => {
+                    self.check_election_timeout().await?;
+                    sleep.as_mut().set(tokio::time::sleep(self.get_random_election_timeout()));
                 }
             }
         }
@@ -467,11 +471,11 @@ impl RaftNode {
 
     fn become_leader(&mut self) -> Result<()> {
         info!("Becoming leader");
-        let (tx, _rx) = mpsc::channel(1);
         self.state = NodeState::Leader;
-        self.start_heartbeat_timer(tx.clone());
+        self.start_heartbeat_timer();
         Ok(())
     }
+
     fn step_down(&mut self, new_term: u64) -> Result<()> {
         info!("Stepping down");
         self.state = NodeState::Follower;
