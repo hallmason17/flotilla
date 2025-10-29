@@ -1,6 +1,6 @@
 
 [node]
-id = 1
+id = 2
 
 [cluster.nodes]
 "1" = "127.0.0.1:5001"

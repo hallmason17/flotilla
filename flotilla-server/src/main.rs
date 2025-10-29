@@ -18,39 +18,53 @@ struct ClusterConfig {
 }
 #[derive(Debug, Deserialize, Parser)]
 struct NodeConfig {
-    id: Option<i32>,
+    node_id: Option<i32>,
+    config_file: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    setup_logger();
-    let args = NodeConfig::parse();
-    let config_file = fs::read_to_string("resources/config.toml")?;
-    let mut cfg: Config = toml::from_str(&config_file)?;
-    if let Some(id) = args.id {
-        cfg.node.id = Some(id);
-    }
+    setup_logger()?;
 
-    let node_cfg = RaftNodeConfig::new(
-        cfg.node.id.expect("no id").to_string(),
-        *cfg.cluster
-            .nodes
-            .get(&cfg.node.id.expect("no id").to_string())
-            .expect("could not get addr from node config."),
-        cfg.cluster.nodes,
-    );
+    let node_config = parse_config()?;
 
-    let mut node = RaftNode::new(node_cfg.clone());
+    let mut node = RaftNode::new(node_config.clone());
+
     println!("{:?}", node);
+
     node.run().await?;
 
     Ok(())
 }
 
-fn setup_logger() {
+fn parse_config() -> Result<RaftNodeConfig> {
+    let args = NodeConfig::parse();
+    let config_path = match args.config_file {
+        Some(file) => file,
+        None => String::from("resources/config.toml"),
+    };
+    let config_file = fs::read_to_string(config_path)?;
+    let mut cfg: Config = toml::from_str(&config_file)?;
+    if let Some(id) = args.node_id {
+        cfg.node.node_id = Some(id);
+    }
+
+    let config = RaftNodeConfig::new(
+        cfg.node.node_id.expect("no id").to_string(),
+        *cfg.cluster
+            .nodes
+            .get(&cfg.node.node_id.expect("no id").to_string())
+            .expect("could not get addr from node config."),
+        cfg.cluster.nodes,
+    );
+    Ok(config)
+}
+
+fn setup_logger() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    Ok(())
 }

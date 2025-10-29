@@ -1,3 +1,4 @@
+pub mod error;
 pub mod raft_node;
 pub mod rpc;
 pub mod state;
@@ -8,12 +9,19 @@ use anyhow::Result;
 use std::net::SocketAddr;
 
 pub use raft_node::{RaftMessage, RaftNode, RaftNodeConfig};
-pub use state::{Command, LogEntry, NodeState};
+pub use state::{LogEntry, NodeState};
 
+use bincode::{Decode, Encode};
 use raft_rpc::raft_service_client::RaftServiceClient;
 use raft_rpc::{
     AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
+
+#[derive(Debug, Clone, Decode, Encode)]
+pub enum Command {
+    Set { key: String, value: String },
+    Delete { key: String },
+}
 
 pub(crate) async fn send_append_entries(
     request: AppendEntriesRequest,

@@ -1,4 +1,3 @@
-use anyhow::Result;
 use rand::Rng;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -14,6 +13,8 @@ use tracing::info;
 use crate::Command;
 use crate::LogEntry;
 use crate::NodeState;
+use crate::error::RaftError;
+use crate::error::RaftResult;
 use crate::raft_rpc::key_value_service_server::KeyValueServiceServer;
 use crate::raft_rpc::raft_service_server::RaftServiceServer;
 use crate::raft_rpc::{
@@ -50,6 +51,7 @@ pub enum RaftMessage {
     },
     ElectionTimeout,
 }
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct RaftNode {
     state: NodeState,
@@ -64,10 +66,10 @@ pub struct RaftNode {
     last_heartbeat: Instant,
     election_timeout_ms: Duration,
     peers: HashMap<String, SocketAddr>,
-    store: HashMap<String, String>,
     next_index: HashMap<String, u64>,
     match_index: HashMap<String, u64>,
     log: Vec<LogEntry>,
+    store: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -354,7 +356,7 @@ impl RaftNode {
         }
     }
 
-    async fn replicate_log(&mut self, index: u64) -> Result<()> {
+    async fn replicate_log(&mut self, index: u64) -> RaftResult<()> {
         let entry = self
             .log
             .get(index as usize - 1)
@@ -393,10 +395,10 @@ impl RaftNode {
             }
         }
 
-        Err(anyhow::anyhow!("Failed to achieve majority"))
+        Err(RaftError::ReplicationFailure)
     }
 
-    async fn check_election_timeout(&mut self) -> Result<()> {
+    async fn check_election_timeout(&mut self) -> RaftResult<()> {
         if matches!(self.state, NodeState::Follower)
             && self.last_heartbeat.elapsed() > self.election_timeout_ms
         {
@@ -412,7 +414,7 @@ impl RaftNode {
         self.log.last().map(|e| e.idx).unwrap_or(0)
     }
 
-    async fn start_election(&mut self) -> Result<()> {
+    async fn start_election(&mut self) -> RaftResult<()> {
         self.state = NodeState::Candidate;
         self.current_term += 1;
         self.votes_received += 1;
@@ -460,24 +462,32 @@ impl RaftNode {
         if !matches!(self.state, NodeState::Leader) {
             info!("Election failed, not enough votes");
             self.state = NodeState::Follower;
+            self.voted_for = None;
+            self.votes_received = 0;
         }
 
-        Ok(())
+        Err(RaftError::ElectionFailure)
     }
 
-    fn become_leader(&mut self) -> Result<()> {
+    #[tracing::instrument]
+    fn become_leader(&mut self) -> RaftResult<()> {
         info!("Becoming leader");
         let (tx, _rx) = mpsc::channel(1);
         self.state = NodeState::Leader;
+        self.votes_received = 0;
+        self.voted_for = None;
         self.start_heartbeat_timer(tx.clone());
         Ok(())
     }
-    fn step_down(&mut self, new_term: u64) -> Result<()> {
+
+    #[tracing::instrument]
+    fn step_down(&mut self, new_term: u64) -> RaftResult<()> {
         info!("Stepping down");
         self.state = NodeState::Follower;
         self.voted_for = None;
         self.current_term = new_term;
         self.last_heartbeat = Instant::now();
+        self.votes_received = 0;
         Ok(())
     }
 }

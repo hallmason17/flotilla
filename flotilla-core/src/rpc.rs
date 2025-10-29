@@ -2,7 +2,6 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tonic::{Request, Response, Status};
-use tracing::info;
 
 use crate::raft_rpc::*;
 
@@ -11,6 +10,7 @@ use crate::raft_rpc::{
     key_value_service_server::KeyValueService, raft_service_server::RaftService,
 };
 
+#[derive(Debug)]
 pub(crate) struct RaftServiceImpl {
     pub tx: mpsc::Sender<RaftMessage>,
 }
@@ -30,9 +30,9 @@ impl RaftService for RaftServiceImpl {
             .await
             .expect("Could not send message");
         let response = rx.await.expect("No response");
-        info!("{:?}", response);
         Ok(Response::new(response))
     }
+
     async fn append_entries(
         &self,
         request: Request<AppendEntriesRequest>,
@@ -46,7 +46,6 @@ impl RaftService for RaftServiceImpl {
             .await
             .expect("Could not send message");
         let response = rx.await.expect("No response");
-        info!("{:?}", response);
         Ok(Response::new(response))
     }
 }
