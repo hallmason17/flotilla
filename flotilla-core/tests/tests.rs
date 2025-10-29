@@ -1,5 +1,5 @@
 use anyhow::Result;
-use flotilla::raft::raft_rpc::{
+use flotilla_core::raft_rpc::{
     RequestVoteRequest, RequestVoteResponse, raft_service_client::RaftServiceClient,
 };
 

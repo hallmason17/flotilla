@@ -1,5 +1,5 @@
 use anyhow::Result;
-use flotilla::raft_rpc::{
+use flotilla_core::raft_rpc::{
     GetRequest, SetRequest, get_response, key_value_service_client::KeyValueServiceClient,
     set_response,
 };

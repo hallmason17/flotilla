@@ -252,21 +252,43 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
 
 [[package]]
-name = "flotilla"
+name = "flotilla-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flotilla-core",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "flotilla-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
- "clap",
  "prost",
  "rand",
  "serde",
  "thiserror",
  "tokio",
- "toml",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "flotilla-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "flotilla-core",
+ "serde",
+ "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]

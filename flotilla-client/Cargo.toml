@@ -1,0 +1,10 @@
+[package]
+name = "flotilla-client"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+flotilla-core = { path = "../flotilla-core" }
+tokio = { workspace = true }
+serde = { workspace = true }
+anyhow = "1.0.100"
