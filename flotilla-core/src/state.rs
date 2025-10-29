@@ -1,12 +1,7 @@
 use bincode::{Decode, Encode, config, error::DecodeError};
 
+use crate::Command;
 use crate::raft_rpc;
-
-#[derive(Debug, Clone, Decode, Encode)]
-pub enum Command {
-    Set { key: String, value: String },
-    Delete { key: String },
-}
 
 #[derive(Debug, Clone)]
 pub enum NodeState {
