@@ -17,9 +17,7 @@ async fn main() -> Result<()> {
         .await?;
     let elapsed = timer.elapsed();
     match response.into_inner().result {
-        Some(set_response::Result::Success(_)) => {
-            println!("Set success!");
-        }
+        Some(set_response::Result::Success(_)) => {}
         Some(set_response::Result::Error(e)) => {
             println!("Error {}", e.message);
             if let Some(leader) = e.leader_addr {
