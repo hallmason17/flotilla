@@ -5,7 +5,7 @@ use tracing_subscriber::EnvFilter;
 
 use serde::Deserialize;
 
-use flotilla::raft::{RaftNode, RaftNodeConfig};
+use flotilla::raft_node::{RaftNode, RaftNodeConfig};
 
 #[derive(Debug, Deserialize)]
 struct Config {

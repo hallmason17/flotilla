@@ -18,8 +18,8 @@ anyhow = "1.0.100"
 thiserror = "2.0.17"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
-clap = { version = "4.5.50", features = ["derive"] }
 bincode = { version = "2.0.1"}
+clap = { version = "4.5.50", features = ["derive"] }
 
 [build-dependencies]
 tonic-prost-build = "*"

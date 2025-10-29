@@ -1,105 +1,32 @@
-use std::{collections::HashMap, time::Duration};
-
 use anyhow::Result;
-use bincode::error::DecodeError;
-use bincode::{Decode, Encode, config};
 use rand::Rng;
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::{self, JoinSet};
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tonic::transport::Server;
-use tonic::{Request, Response, Status};
-use tracing::{debug, info};
+use tracing::info;
 
-use raft_rpc::raft_service_server::RaftService;
-
-use raft_rpc::{AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse};
-
-use raft_rpc::AppendEntriesRequest;
-
-use raft_rpc::key_value_service_server::{KeyValueService, KeyValueServiceServer};
-use raft_rpc::raft_service_client::RaftServiceClient;
-use raft_rpc::raft_service_server::RaftServiceServer;
-use raft_rpc::{
-    DeleteRequest, DeleteResponse, GetRequest, GetResponse, NotFound, SetRequest, SetResponse,
-    delete_response, get_response, set_response,
+use crate::Command;
+use crate::LogEntry;
+use crate::NodeState;
+use crate::raft_rpc::key_value_service_server::KeyValueServiceServer;
+use crate::raft_rpc::raft_service_server::RaftServiceServer;
+use crate::raft_rpc::{
+    self, AppendEntriesRequest, AppendEntriesResponse, DeleteResponse, GetResponse, NotFound,
+    RequestVoteRequest, RequestVoteResponse, SetResponse, delete_response, get_response,
+    set_response,
 };
-
-pub mod raft_rpc {
-    tonic::include_proto!("raft");
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-enum NodeState {
-    Follower,
-    Candidate,
-    Leader,
-}
-#[allow(dead_code)]
-#[derive(Debug, Clone, Decode, Encode)]
-enum Command {
-    Set { key: String, value: String },
-    Delete { key: String },
-}
-#[allow(dead_code)]
-#[derive(Debug, Clone, Decode, Encode)]
-struct LogEntry {
-    term: u64,
-    idx: u64,
-    command: Command,
-}
-impl From<LogEntry> for raft_rpc::LogEntry {
-    fn from(entry: LogEntry) -> Self {
-        let command_bytes = bincode::encode_to_vec(&entry.command, config::standard())
-            .expect("Failed to serialize command");
-
-        raft_rpc::LogEntry {
-            term: entry.term,
-            index: entry.idx,
-            command: command_bytes,
-        }
-    }
-}
-
-impl TryFrom<raft_rpc::LogEntry> for LogEntry {
-    type Error = DecodeError;
-
-    fn try_from(proto: raft_rpc::LogEntry) -> Result<Self, Self::Error> {
-        let (command, _): (Command, usize) =
-            bincode::decode_from_slice(&proto.command, config::standard())?;
-
-        Ok(LogEntry {
-            term: proto.term,
-            idx: proto.index,
-            command,
-        })
-    }
-}
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct RaftNode {
-    state: NodeState,
-    current_term: u64,
-    commit_index: u64,
-    last_applied: u64,
-    votes_received: u64,
-    voted_for: Option<String>,
-    id: String,
-    addr: SocketAddr,
-    leader_heartbeat_handle: Option<task::JoinHandle<()>>,
-    last_heartbeat: Instant,
-    election_timeout_ms: Duration,
-    peers: HashMap<String, SocketAddr>,
-    store: HashMap<String, String>,
-    next_index: HashMap<String, u64>,
-    match_index: HashMap<String, u64>,
-    log: Vec<LogEntry>,
-}
+use crate::rpc::RaftServiceImpl;
+use crate::send_append_entries;
+use crate::send_request_vote;
 
 #[derive(Debug)]
-enum RaftMessage {
+pub enum RaftMessage {
     VoteRequest {
         message: RequestVoteRequest,
         response: oneshot::Sender<RequestVoteResponse>,
@@ -123,9 +50,24 @@ enum RaftMessage {
     },
     ElectionTimeout,
 }
-
-struct RaftServiceImpl {
-    tx: mpsc::Sender<RaftMessage>,
+#[derive(Debug)]
+pub struct RaftNode {
+    state: NodeState,
+    current_term: u64,
+    commit_index: u64,
+    last_applied: u64,
+    votes_received: u64,
+    voted_for: Option<String>,
+    id: String,
+    addr: SocketAddr,
+    leader_heartbeat_handle: Option<JoinHandle<()>>,
+    last_heartbeat: Instant,
+    election_timeout_ms: Duration,
+    peers: HashMap<String, SocketAddr>,
+    store: HashMap<String, String>,
+    next_index: HashMap<String, u64>,
+    match_index: HashMap<String, u64>,
+    log: Vec<LogEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -432,7 +374,7 @@ impl RaftNode {
                 leader_commit: self.commit_index,
             };
             info!("Sending request: {:?}", request);
-            let peer_addr = peer_addr.clone();
+            let peer_addr = *peer_addr;
             tasks.spawn(async move { send_append_entries(request, peer_addr).await });
         }
 
@@ -537,112 +479,5 @@ impl RaftNode {
         self.current_term = new_term;
         self.last_heartbeat = Instant::now();
         Ok(())
-    }
-}
-
-async fn send_append_entries(
-    request: AppendEntriesRequest,
-    peer_addr: SocketAddr,
-) -> Result<AppendEntriesResponse> {
-    let mut client =
-        RaftServiceClient::connect(format!("http://{}:{}", peer_addr.ip(), peer_addr.port()))
-            .await?;
-    let res = client.append_entries(request).await?;
-    Ok(res.into_inner())
-}
-
-async fn send_request_vote(
-    request: RequestVoteRequest,
-    peer_addr: SocketAddr,
-) -> Result<RequestVoteResponse> {
-    let mut client =
-        RaftServiceClient::connect(format!("http://{}:{}", peer_addr.ip(), peer_addr.port()))
-            .await?;
-    let res = client.request_vote(request).await?;
-    Ok(res.into_inner())
-}
-
-#[tonic::async_trait]
-impl RaftService for RaftServiceImpl {
-    async fn request_vote(
-        &self,
-        request: Request<RequestVoteRequest>,
-    ) -> Result<Response<RequestVoteResponse>, Status> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(RaftMessage::VoteRequest {
-                message: request.into_inner(),
-                response: tx,
-            })
-            .await
-            .expect("Could not send message");
-        let response = rx.await.expect("No response");
-        info!("{:?}", response);
-        Ok(Response::new(response))
-    }
-    async fn append_entries(
-        &self,
-        request: Request<AppendEntriesRequest>,
-    ) -> Result<Response<AppendEntriesResponse>, Status> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(RaftMessage::AppendEntries {
-                message: request.into_inner(),
-                response: tx,
-            })
-            .await
-            .expect("Could not send message");
-        let response = rx.await.expect("No response");
-        info!("{:?}", response);
-        Ok(Response::new(response))
-    }
-}
-
-#[tonic::async_trait]
-impl KeyValueService for RaftServiceImpl {
-    async fn delete(
-        &self,
-        request: Request<DeleteRequest>,
-    ) -> Result<Response<DeleteResponse>, Status> {
-        let (tx, rx) = oneshot::channel();
-        let req = request.into_inner();
-        self.tx
-            .send(RaftMessage::ClientDeleteRequest {
-                key: req.key,
-                response: tx,
-            })
-            .await
-            .expect("Failed to send message");
-        let response = rx.await.expect("No response");
-        Ok(Response::new(response))
-    }
-
-    async fn get(&self, request: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
-        let (tx, rx) = oneshot::channel();
-        let req = request.into_inner();
-        self.tx
-            .send(RaftMessage::ClientGetRequest {
-                key: req.key,
-                response: tx,
-            })
-            .await
-            .expect("Failed to send message");
-        let response = rx.await.expect("No response");
-        Ok(Response::new(response))
-    }
-
-    async fn set(&self, request: Request<SetRequest>) -> Result<Response<SetResponse>, Status> {
-        let (tx, rx) = oneshot::channel();
-        let req = request.into_inner();
-        self.tx
-            .send(RaftMessage::ClientSetRequest {
-                key: req.key,
-                value: req.value,
-                response: tx,
-            })
-            .await
-            .expect("Failed to send message");
-        let response = rx.await.expect("No response");
-        Ok(Response::new(response))
     }
 }
