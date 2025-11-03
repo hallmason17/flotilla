@@ -8,3 +8,4 @@ flotilla-core = { path = "../flotilla-core" }
 tokio = { workspace = true }
 serde = { workspace = true }
 anyhow = "1.0.100"
+clap = { version = "4.5.50", features = ["derive"] }

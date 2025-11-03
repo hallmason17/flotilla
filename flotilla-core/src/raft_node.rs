@@ -100,49 +100,49 @@ pub enum RaftMessage {
 pub struct RaftNode {
     /// Current state of this node (Follower, Candidate, or Leader)
     state: NodeState,
-    
+
     /// Latest term this node has seen (monotonically increasing)
     current_term: u64,
-    
+
     /// Index of highest log entry known to be committed
     commit_index: u64,
-    
+
     /// Index of highest log entry applied to state machine
     last_applied: u64,
-    
+
     /// Number of votes received in current election (used when Candidate)
     votes_received: u64,
-    
+
     /// CandidateId that received vote in current term (or None)
     voted_for: Option<String>,
-    
+
     /// Unique identifier for this node
     id: String,
-    
+
     /// Network address where this node listens
     addr: SocketAddr,
-    
+
     /// Handle to the leader's heartbeat task (Some when Leader, None otherwise)
     leader_heartbeat_handle: Option<JoinHandle<()>>,
-    
+
     /// Timestamp of last heartbeat received from leader
     last_heartbeat: Instant,
-    
+
     /// Duration to wait before starting election (randomized to avoid split votes)
     election_timeout_ms: Duration,
-    
+
     /// Map of peer node IDs to their network addresses
     peers: HashMap<String, SocketAddr>,
-    
+
     /// For each peer, index of the next log entry to send (Leader only)
     next_index: HashMap<String, u64>,
-    
+
     /// For each peer, index of highest log entry known to be replicated (Leader only)
     match_index: HashMap<String, u64>,
-    
+
     /// Replicated log of commands
     log: Vec<LogEntry>,
-    
+
     /// The key-value store state machine
     store: HashMap<String, String>,
 }
@@ -155,10 +155,10 @@ pub struct RaftNode {
 pub struct RaftNodeConfig {
     /// Unique identifier for the node
     id: String,
-    
+
     /// Network address where the node will listen
     pub addr: SocketAddr,
-    
+
     /// Map of peer node IDs to their network addresses
     peers: HashMap<String, SocketAddr>,
 }
@@ -259,7 +259,7 @@ impl RaftNode {
                     }
                     Some(RaftMessage::AppendEntries { message, response }) => {
                         let resp = self.handle_append_entries(message);
-                        let _ = response.send(resp);
+                        let _ = response.send(resp?);
                     }
                     Some(RaftMessage::ClientGetRequest { key, response } )=> {
                         let resp = self.handle_get_request(&key);
@@ -271,7 +271,7 @@ impl RaftNode {
                         response,
                     }) => {
                         let resp = self.handle_set_request(&key, &value).await;
-                        let _ = response.send(resp);
+                        let _ = response.send(resp?);
                     }
                     Some(RaftMessage::ClientDeleteRequest { key, response } )=> {
                         let resp = self.handle_delete_request(&key);
@@ -425,15 +425,15 @@ impl RaftNode {
     /// Returns an error if:
     /// - This node is not the leader
     /// - Replication to a majority of nodes fails
-    async fn handle_set_request(&mut self, key: &str, value: &str) -> SetResponse {
+    async fn handle_set_request(&mut self, key: &str, value: &str) -> RaftResult<SetResponse> {
         if !matches!(self.state, NodeState::Leader) {
-            return SetResponse {
+            return Ok(SetResponse {
                 result: Some(set_response::Result::Error(raft_rpc::Error {
                     message: "Not leader".to_string(),
                     leader_id: None,
                     leader_addr: None,
                 })),
-            };
+            });
         }
         let log_entry = LogEntry {
             term: self.current_term,
@@ -448,18 +448,18 @@ impl RaftNode {
         match append_result {
             Ok(()) => {
                 self.commit_index = log_entry.idx;
-                self.store.insert(key.to_string(), value.to_string());
-                SetResponse {
+                self.apply_log_entries()?;
+                Ok(SetResponse {
                     result: Some(set_response::Result::Success(raft_rpc::Success {})),
-                }
+                })
             }
-            Err(e) => SetResponse {
+            Err(e) => Ok(SetResponse {
                 result: Some(set_response::Result::Error(raft_rpc::Error {
                     message: format!("Replication failed: {}", e),
                     leader_id: None,
                     leader_addr: None,
                 })),
-            },
+            }),
         }
     }
 
@@ -564,7 +564,10 @@ impl RaftNode {
     /// # Returns
     ///
     /// A response indicating success/failure and the current term
-    fn handle_append_entries(&mut self, message: AppendEntriesRequest) -> AppendEntriesResponse {
+    fn handle_append_entries(
+        &mut self,
+        message: AppendEntriesRequest,
+    ) -> RaftResult<AppendEntriesResponse> {
         let mut success = false;
         if message.term > self.current_term {
             self.current_term = message.term;
@@ -576,10 +579,10 @@ impl RaftNode {
             info!("Received heartbeat from leader");
             self.last_heartbeat = Instant::now();
             self.current_term = message.term;
-            return AppendEntriesResponse {
+            return Ok(AppendEntriesResponse {
                 term: self.current_term,
                 success: true,
-            };
+            });
         }
 
         if message.term >= self.current_term && message.prev_log_index == 0
@@ -588,22 +591,32 @@ impl RaftNode {
         {
             success = true;
             let start_idx = message.prev_log_index as usize;
-            for entry in message.entries {
+            for entry in &message.entries {
                 info!("Adding {:?} to log from leader!", entry);
                 if start_idx < self.log.len() {
                     self.log[start_idx] =
-                        LogEntry::try_from(entry).expect("could not convert to LogEntry");
+                        LogEntry::try_from(entry.clone()).expect("could not convert to LogEntry");
                 } else {
-                    self.log
-                        .push(LogEntry::try_from(entry).expect("could not convert to LogEntry"));
+                    self.log.push(
+                        LogEntry::try_from(entry.clone()).expect("could not convert to LogEntry"),
+                    );
                 }
             }
         }
 
-        AppendEntriesResponse {
+        if message.leader_commit > self.commit_index && !message.entries.is_empty() {
+            self.commit_index =
+                std::cmp::min(message.leader_commit, message.entries.last().unwrap().index);
+        }
+
+        self.apply_log_entries()?;
+
+        info!("{:?}", self);
+
+        Ok(AppendEntriesResponse {
             term: self.current_term,
             success,
-        }
+        })
     }
 
     /// Replicates a log entry to a majority of followers.
@@ -655,6 +668,7 @@ impl RaftNode {
             {
                 success_count += 1;
                 if success_count >= needed {
+                    self.commit_index += 1;
                     tasks.abort_all();
                     return Ok(());
                 }
@@ -814,6 +828,24 @@ impl RaftNode {
         self.last_heartbeat = Instant::now();
         self.votes_received = 0;
         self.start_heartbeat_timer();
+        Ok(())
+    }
+
+    #[tracing::instrument]
+    fn apply_log_entries(&mut self) -> RaftResult<()> {
+        while self.last_applied < self.commit_index {
+            let entry = &self.log[self.last_applied as usize];
+
+            match &entry.command {
+                Command::Set { key, value } => {
+                    self.store.insert(key.to_string(), value.to_string());
+                }
+                Command::Delete { key } => {
+                    self.store.remove(key);
+                }
+            }
+            self.last_applied += 1;
+        }
         Ok(())
     }
 }
