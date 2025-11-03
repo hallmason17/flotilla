@@ -40,13 +40,17 @@ This is an active work-in-progress implementation. Currently implemented:
 ### flotilla-server
 - Key-value storage state machine
 - Cluster node implementation
-- Request forwarding to leader
 - Strong consistency guarantees via Raft
+
+### TODO
+- Request forwarding to leader
 
 ### flotilla-client
 - Simple CLI for interacting with the cluster
-- Automatic leader discovery
 - GET, SET, DELETE operations
+
+### TODO
+- Automatic leader discovery
 
 ## Getting Started
 
